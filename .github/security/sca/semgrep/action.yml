@@ -1,0 +1,115 @@
+name: 'Semgrep Code Scanner'
+description: 'Scan code for SAST findings using Semgrep and comment the results'
+inputs:
+  path:
+    description: 'Directory to scan'
+    default: '.'
+    required: false
+  config:
+    description: 'Semgrep configuration (e.g., auto, p/default, p/security-audit)'
+    default: 'auto'
+    required: false
+  pr_id:
+    description: 'Pull request ID for commenting results'
+    required: false
+  github_token:
+    description: 'GitHub token for authentication (required if pr_id is provided)'
+    required: false
+  fail_on_findings:
+    description: 'Whether to fail the action if findings are found'
+    default: 'true'
+    required: false
+  fail_threshold:
+    description: 'Minimum severity level to fail the action (ERROR, WARNING, INFO)'
+    default: 'ERROR'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Semgrep scan
+      shell: bash
+      id: scan
+      env:
+        WORKSPACE: ${{ github.workspace }}
+        CONFIG: ${{ inputs.config }}
+        SCAN_PATH: ${{ inputs.path }}
+      run: |
+        VERSION="1.156.0" # Only change this to update the version
+        echo "Running Semgrep scan version $VERSION..."
+        
+        # Pull the image
+        docker pull semgrep/semgrep:$VERSION > /dev/null
+        
+        # Run semgrep and capture output for formatting
+        docker run --rm \
+          -v "$WORKSPACE":/src \
+          -w /src \
+          semgrep/semgrep:$VERSION \
+          semgrep scan --config="$CONFIG" --json -o semgrep-report.json "$SCAN_PATH" > semgrep-output.txt 2>&1 || true
+          
+    - name: Format Semgrep Scan Result
+      shell: bash
+      id: format
+      env:
+        FAIL_THRESHOLD: ${{ inputs.fail_threshold }}
+      run: |
+        if [ ! -f semgrep-report.json ] || [ ! -s semgrep-report.json ]; then
+          echo "### ⚠️ Semgrep scan failed to produce a report, please contact the DevOps team to resolve this issue" > formatted-results.md
+          echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Check for findings in JSON report
+        FINDINGS_COUNT=$(jq '.results | length' semgrep-report.json 2>/dev/null || echo 0)
+        
+        # Determine if we should fail based on threshold
+        # FAIL_THRESHOLD is provided via env
+        if [ "$FAIL_THRESHOLD" == "ERROR" ]; then
+          FAIL_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-report.json 2>/dev/null || echo 0)
+        elif [ "$FAIL_THRESHOLD" == "WARNING" ]; then
+          FAIL_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR" or .extra.severity == "WARNING")] | length' semgrep-report.json 2>/dev/null || echo 0)
+        else
+          FAIL_COUNT=$FINDINGS_COUNT
+        fi
+
+        if [ "$FAIL_COUNT" -gt 0 ]; then
+          echo "should_fail=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "should_fail=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ "$FINDINGS_COUNT" -gt 0 ]; then
+          echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          echo -e "### ❌ Semgrep detected $FINDINGS_COUNT potential security or code quality issues\n" > formatted-results.md
+          
+          echo "#### 🔍 Findings" >> formatted-results.md
+          echo "| File | Line | Severity | Message |" >> formatted-results.md
+          echo "| ---- | ---- | -------- | ----------- |" >> formatted-results.md
+          # Parse JSON and format as markdown table rows (remove newlines from messages)
+          jq -r '.results[] | "| \(.path) | \(.start.line) | \(.extra.severity) | \(.extra.message | gsub("\n"; " ")) |"' semgrep-report.json >> formatted-results.md
+          
+          echo -e "\n<details><summary>Scan Details</summary>\n\n\`\`\`\n$(cat semgrep-output.txt)\n\`\`\`\n</details>" >> formatted-results.md
+        else
+          echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          echo -e "### ✅ No potential issues detected by Semgrep" > formatted-results.md
+        fi
+
+    - name: Semgrep comment
+      if: ${{ inputs.pr_id && inputs.github_token }}
+      uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+      with:
+        token: ${{ inputs.github_token }}
+        issue-number: ${{ inputs.pr_id }}
+        body-file: formatted-results.md
+
+    - name: Fail if findings found
+      if: ${{ inputs.fail_on_findings == 'true' && steps.format.outputs.should_fail == 'true' }}
+      shell: bash
+      run: |
+        echo "Semgrep detected potential issues in the code. Please review the findings."
+        exit 1
+
+    - name: Clean up temporary files
+      shell: bash
+      run: rm -f semgrep-report.json semgrep-output.txt formatted-results.md

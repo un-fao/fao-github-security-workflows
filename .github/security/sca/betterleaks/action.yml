@@ -1,0 +1,120 @@
+name: 'Betterleaks Secret Scanner'
+description: 'Scan code for secrets using Betterleaks and comment the results'
+inputs:
+  path:
+    description: 'Directory to scan'
+    default: '.'
+    required: false
+  config_path:
+    description: 'Path to Betterleaks configuration file'
+    required: false
+  baseline_path:
+    description: 'Path to Betterleaks baseline file'
+    required: false
+  pr_id:
+    description: 'Pull request ID for commenting results'
+    required: false
+  github_token:
+    description: 'GitHub token for authentication (required if pr_id is provided)'
+    required: false
+  validation:
+    description: 'Enable validation of findings against live APIs'
+    default: 'false'
+    required: false
+  fail_on_leaks:
+    description: 'Whether to fail the action if leaks are found'
+    default: 'true'
+    required: false
+  command:
+    description: 'Betterleaks command to run (git or dir)'
+    default: 'dir'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Betterleaks scan
+      shell: bash
+      id: scan
+      env:
+        CONFIG_PATH: ${{ inputs.config_path }}
+        BASELINE_PATH: ${{ inputs.baseline_path }}
+        VALIDATION: ${{ inputs.validation }}
+        WORKSPACE: ${{ github.workspace }}
+        COMMAND: ${{ inputs.command }}
+        SCAN_PATH: ${{ inputs.path }}
+      run: |
+        VERSION="v1.1.1" # Only change this to update the version
+        OPTS=""
+        if [ -n "$CONFIG_PATH" ]; then OPTS="$OPTS --config $CONFIG_PATH"; fi
+        if [ -n "$BASELINE_PATH" ]; then OPTS="$OPTS --baseline-path $BASELINE_PATH"; fi
+        if [ "$VALIDATION" == "true" ]; then OPTS="$OPTS --validation"; fi
+        
+        echo "Running Betterleaks scan version $VERSION..."
+        
+        # Pull the image
+        docker pull ghcr.io/betterleaks/betterleaks:$VERSION > /dev/null
+        
+        # Run betterleaks and capture output for formatting
+        # We use 'dir' scan to scan the current workspace state
+        docker run --rm \
+          -v "$WORKSPACE":/workspace \
+          -w /workspace \
+          ghcr.io/betterleaks/betterleaks:$VERSION \
+          "$COMMAND" "$SCAN_PATH" \
+          --no-banner \
+          --no-color \
+          --report-format json \
+          --report-path betterleaks-report.json \
+          $OPTS > betterleaks-output.txt 2>&1 || true
+
+        # Strip ANSI escape codes from the output for cleaner PR comments
+        sed -i "s/$(printf '\033')\[[0-9;]*[mK]//g" betterleaks-output.txt
+          
+    - name: Format Betterleaks Scan Result
+      shell: bash
+      id: format
+      run: |
+        if [ ! -f betterleaks-report.json ] || [ ! -s betterleaks-report.json ]; then
+          echo "### ⚠️ Betterleaks scan failed to produce a report, please contact the DevOps team to resolve this issue" > formatted-results.md
+          echo "has_leaks=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Check for leaks in JSON report
+        LEAKS_COUNT=$(jq '. | length' betterleaks-report.json 2>/dev/null || echo 0)
+        
+        if [ "$LEAKS_COUNT" -gt 0 ]; then
+          echo "has_leaks=true" >> "$GITHUB_OUTPUT"
+          echo -e "### ❌ Betterleaks detected $LEAKS_COUNT potential secrets\n" > formatted-results.md
+          
+          echo "#### 🔍 Findings" >> formatted-results.md
+          echo "| File | Line | Description |" >> formatted-results.md
+          echo "| ---- | ---- | ----------- |" >> formatted-results.md
+          # Parse JSON and format as markdown table rows
+          jq -r '.[] | "| \(.File) | \(.StartLine) | \(.Description) |"' betterleaks-report.json >> formatted-results.md
+          
+          echo -e "\n<details><summary>Scan Details</summary>\n\n\`\`\`\n$(cat betterleaks-output.txt)\n\`\`\`\n</details>" >> formatted-results.md
+        else
+          echo "has_leaks=false" >> "$GITHUB_OUTPUT"
+          echo -e "### ✅ No potential secrets detected by Betterleaks" > formatted-results.md
+        fi
+
+    - name: Betterleaks comment
+      if: ${{ inputs.pr_id && inputs.github_token }}
+      uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+      with:
+        token: ${{ inputs.github_token }}
+        issue-number: ${{ inputs.pr_id }}
+        body-file: formatted-results.md
+
+    - name: Fail if leaks found
+      if: ${{ inputs.fail_on_leaks == 'true' && steps.format.outputs.has_leaks == 'true' }}
+      shell: bash
+      run: |
+        echo "Betterleaks detected potential secrets in the code. Please review the findings."
+        exit 1
+
+    - name: Clean up temporary files
+      shell: bash
+      run: rm -f betterleaks-report.json betterleaks-output.txt formatted-results.md

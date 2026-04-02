@@ -1,0 +1,32 @@
+name: Organization Security Code Scanning
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  secret-scanning:
+    name: Secret Scanning - Betterleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Betterleaks
+        uses: ./.github/security/sca/betterleaks
+        with:
+          pr_id: ${{ github.event.pull_request.number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  sast-scanning:
+    name: SAST Scanning - Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Semgrep
+        uses: ./.github/security/sca/semgrep
+        with:
+          pr_id: ${{ github.event.pull_request.number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fail_threshold: ERROR
