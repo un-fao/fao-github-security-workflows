@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Run Betterleaks
-        uses: un-fao/fao-github-security-workflows/.github/security/sca/betterleaks@main
+        uses: un-fao/fao-github-workflows/.github/security/sca/betterleaks@main
         with:
           pr_id: ${{ github.event.pull_request.number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -26,8 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Run Semgrep
-        uses: un-fao/fao-github-security-workflows/.github/security/sca/semgrep@main
+        uses: un-fao/fao-github-workflows/.github/security/sca/semgrep@main
         with:
           pr_id: ${{ github.event.pull_request.number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           fail_threshold: ERROR
+
+  dependabot-scanning:
+    name: SCA Scanning - Dependabot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Dependabot Inspector
+        uses: un-fao/fao-github-workflows/.github/security/sca/dependabot@main
+        with:
+          pr_id: ${{ github.event.pull_request.number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fail_threshold: critical
