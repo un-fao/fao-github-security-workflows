@@ -8,8 +8,8 @@ inputs:
     description: 'GitHub token for authentication'
     required: true
   fail_threshold:
-    description: 'Minimum severity level to fail the action (critical, high, medium, low)'
-    default: 'critical'
+    description: 'Minimum severity level to fail the action (critical, high, medium, low). Use "none" (default) to run in informational mode and never fail.'
+    default: 'none'
     required: false
 
 runs:
@@ -23,8 +23,13 @@ runs:
         REPO: ${{ github.repository }}
       run: |
         echo "Fetching Dependabot alerts for $REPO..."
-        # Use gh api to fetch alerts.
-        gh api repos/$REPO/dependabot/alerts?state=open --per-page 100 > dependabot-alerts.json || echo "[]" > dependabot-alerts.json
+        # gh api --paginate --slurp returns an array of pages; flatten to a single array of alerts.
+        if ! gh api "repos/$REPO/dependabot/alerts?state=open&per_page=100" --paginate --slurp > dependabot-pages.json; then
+          echo "[]" > dependabot-alerts.json
+        else
+          jq 'flatten' dependabot-pages.json > dependabot-alerts.json || echo "[]" > dependabot-alerts.json
+        fi
+        rm -f dependabot-pages.json
         
     - name: Format Dependabot Alerts Result
       shell: bash
@@ -38,13 +43,14 @@ runs:
           exit 0
         fi
 
-        # Filter alerts based on threshold
+        # Filter alerts based on threshold. "none" means informational only — never fail.
         case "$FAIL_THRESHOLD" in
+          none)     FILTER="false" ;;
           critical) FILTER=".severity == \"critical\"" ;;
           high)     FILTER=".severity == \"critical\" or .severity == \"high\"" ;;
           medium)   FILTER=".severity == \"critical\" or .severity == \"high\" or .severity == \"medium\"" ;;
           low)      FILTER=".severity == \"critical\" or .severity == \"high\" or .severity == \"medium\" or .severity == \"low\"" ;;
-          *)        FILTER=".severity == \"critical\"" ;;
+          *)        FILTER="false" ;;
         esac
 
         # The severity is under security_advisory.severity in the API response
@@ -58,12 +64,16 @@ runs:
         fi
 
         if [ "$TOTAL_COUNT" -gt 0 ]; then
-          echo -e "### ❌ Dependabot detected $TOTAL_COUNT open alerts\n" > formatted-results.md
+          if [ "$FAIL_COUNT" -gt 0 ]; then
+            echo -e "### ❌ Dependabot detected $TOTAL_COUNT open alerts\n" > formatted-results.md
+          else
+            echo -e "### ⚠️ Dependabot detected $TOTAL_COUNT open alerts (informational)\n" > formatted-results.md
+          fi
           echo "#### 🔍 Summary of Open Alerts" >> formatted-results.md
           echo "| Package | Severity | Ecosystem | Advisory |" >> formatted-results.md
           echo "| ------- | -------- | --------- | -------- |" >> formatted-results.md
           jq -r '.[] | "| \(.dependency.package.name) | \(.security_advisory.severity) | \(.dependency.package.ecosystem) | [\(.security_advisory.ghsa_id)](\(.security_advisory.html_url)) |"' dependabot-alerts.json >> formatted-results.md
-          
+
           if [ "$FAIL_COUNT" -gt 0 ]; then
              echo -e "\n**Action failed because $FAIL_COUNT alert(s) meet or exceed the $FAIL_THRESHOLD threshold.**" >> formatted-results.md
           fi

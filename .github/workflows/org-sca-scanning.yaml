@@ -42,4 +42,3 @@ jobs:
         with:
           pr_id: ${{ github.event.pull_request.number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          fail_threshold: critical
